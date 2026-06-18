@@ -4,7 +4,9 @@
       <span class="track-label">{{ label }}</span>
       <span v-if="trackData" class="track-info">
         {{ trackData.filename }} · {{ trackData.duration.toFixed(2) }}s · {{ trackData.sample_rate }}Hz
+        <span v-if="timeOffset > 0" class="offset-badge">+{{ timeOffset.toFixed(2) }}s 延迟</span>
       </span>
+      <span v-if="trackData" class="drag-hint">← 拖拽波形调整偏移 →</span>
     </div>
 
     <div v-if="!trackData" class="upload-zone" @dragover.prevent @drop.prevent="onDrop">
@@ -25,8 +27,12 @@
       </div>
     </div>
 
-    <div v-else class="waveform-container">
-      <canvas ref="waveformCanvas" class="waveform-canvas"></canvas>
+    <div v-else class="waveform-container" :class="{ dragging: isDragging }">
+      <canvas
+        ref="waveformCanvas"
+        class="waveform-canvas"
+        @mousedown="onMouseDown"
+      ></canvas>
     </div>
   </div>
 </template>
@@ -39,13 +45,19 @@ const props = defineProps({
   trackData: { type: Object, default: null },
   progress: { type: Number, default: 0 },
   isPlaying: { type: Boolean, default: false },
+  timeOffset: { type: Number, default: 0 },
+  maxDuration: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['upload'])
+const emit = defineEmits(['upload', 'offsetChange'])
 
 const fileInput = ref(null)
 const waveformCanvas = ref(null)
-let animFrameId = null
+const isDragging = ref(false)
+
+let dragStartX = 0
+let dragStartOffset = 0
+let canvasWidthCache = 0
 
 function onFileChange(e) {
   const file = e.target.files[0]
@@ -55,6 +67,31 @@ function onFileChange(e) {
 function onDrop(e) {
   const file = e.dataTransfer.files[0]
   if (file) emit('upload', file)
+}
+
+function onMouseDown(e) {
+  if (!props.trackData) return
+  isDragging.value = true
+  dragStartX = e.clientX
+  dragStartOffset = props.timeOffset
+  e.preventDefault()
+}
+
+function onMouseMove(e) {
+  if (!isDragging.value) return
+  const canvas = waveformCanvas.value
+  if (!canvas) return
+  const containerWidth = canvas.parentElement.clientWidth
+  if (containerWidth <= 0 || props.maxDuration <= 0) return
+  const deltaX = e.clientX - dragStartX
+  const deltaTime = (deltaX / containerWidth) * props.maxDuration
+  const newOffset = Math.max(0, dragStartOffset + deltaTime)
+  emit('offsetChange', newOffset)
+}
+
+function onMouseUp() {
+  if (!isDragging.value) return
+  isDragging.value = false
 }
 
 function drawWaveform() {
@@ -69,28 +106,56 @@ function drawWaveform() {
   canvas.height = h * dpr
   canvas.style.width = w + 'px'
   canvas.style.height = h + 'px'
+  canvasWidthCache = w
 
   const ctx = canvas.getContext('2d')
   ctx.scale(dpr, dpr)
   ctx.clearRect(0, 0, w, h)
 
   const waveform = props.trackData.waveform
+  const trackDuration = props.trackData.duration
+  const timelineDuration = props.maxDuration || trackDuration
   const centerY = h / 2
-  const barWidth = Math.max(1, w / waveform.length)
   const maxAmp = h / 2 * 0.85
 
   ctx.fillStyle = '#1a1a2e'
   ctx.fillRect(0, 0, w, h)
 
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(0, 0, w, h)
+  ctx.clip()
+
+  const offsetRatio = props.timeOffset / timelineDuration
+  const durationRatio = trackDuration / timelineDuration
+  const trackStartX = offsetRatio * w
+  const trackWidth = durationRatio * w
+  const barWidth = Math.max(1, trackWidth / waveform.length)
+
+  if (props.timeOffset > 0) {
+    ctx.fillStyle = 'rgba(13, 115, 119, 0.08)'
+    ctx.fillRect(0, 0, trackStartX, h)
+
+    ctx.beginPath()
+    ctx.strokeStyle = 'rgba(13, 115, 119, 0.4)'
+    ctx.lineWidth = 1
+    ctx.setLineDash([4, 4])
+    ctx.moveTo(trackStartX, 0)
+    ctx.lineTo(trackStartX, h)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+
   ctx.beginPath()
   ctx.strokeStyle = '#0d7377'
   ctx.lineWidth = 1
-  ctx.moveTo(0, centerY)
-  ctx.lineTo(w, centerY)
+  ctx.moveTo(trackStartX, centerY)
+  ctx.lineTo(trackStartX + trackWidth, centerY)
   ctx.stroke()
 
   for (let i = 0; i < waveform.length; i++) {
-    const x = i * barWidth
+    const x = trackStartX + i * barWidth
+    if (x + barWidth < 0 || x > w) continue
     const amp = waveform[i] * maxAmp
     const gradient = ctx.createLinearGradient(x, centerY - amp, x, centerY + amp)
     gradient.addColorStop(0, '#14ffec')
@@ -99,6 +164,14 @@ function drawWaveform() {
     ctx.fillStyle = gradient
     ctx.fillRect(x, centerY - amp, Math.max(1, barWidth - 0.5), amp * 2)
   }
+
+  if (props.timeOffset > 0) {
+    ctx.fillStyle = '#14ffec'
+    ctx.font = '11px monospace'
+    ctx.fillText(`+${props.timeOffset.toFixed(2)}s`, trackStartX + 6, 16)
+  }
+
+  ctx.restore()
 
   if (props.isPlaying || props.progress > 0) {
     const progressX = props.progress * w
@@ -116,17 +189,20 @@ function drawWaveform() {
   }
 }
 
-watch(() => [props.trackData, props.progress, props.isPlaying], () => {
+watch(() => [props.trackData, props.progress, props.isPlaying, props.timeOffset, props.maxDuration], () => {
   nextTick(drawWaveform)
 }, { deep: true })
 
 onMounted(() => {
   window.addEventListener('resize', drawWaveform)
+  window.addEventListener('mousemove', onMouseMove)
+  window.addEventListener('mouseup', onMouseUp)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', drawWaveform)
-  if (animFrameId) cancelAnimationFrame(animFrameId)
+  window.removeEventListener('mousemove', onMouseMove)
+  window.removeEventListener('mouseup', onMouseUp)
 })
 </script>
 
@@ -160,6 +236,23 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.offset-badge {
+  display: inline-block;
+  background: rgba(255, 46, 99, 0.2);
+  color: #ff2e63;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.drag-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: #556677;
+  flex-shrink: 0;
 }
 
 .upload-zone {
@@ -200,6 +293,15 @@ onUnmounted(() => {
 .waveform-container {
   height: 160px;
   position: relative;
+  cursor: grab;
+}
+
+.waveform-container.dragging {
+  cursor: grabbing;
+}
+
+.waveform-container.dragging .waveform-canvas {
+  user-select: none;
 }
 
 .waveform-canvas {

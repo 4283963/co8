@@ -7,7 +7,7 @@
 
     <div class="timeline-ruler">
       <div class="ruler-marks">
-        <span v-for="t in rulerMarks" :key="t" :style="{ left: (t / maxDuration) * 100 + '%' }" class="ruler-mark">
+        <span v-for="t in rulerMarks" :key="t" :style="{ left: (t / timelineDuration) * 100 + '%' }" class="ruler-mark">
           {{ formatTime(t) }}
         </span>
       </div>
@@ -19,14 +19,20 @@
         :trackData="tracks[0]"
         :progress="progress"
         :isPlaying="isPlaying"
+        :timeOffset="trackOffsets[0]"
+        :maxDuration="timelineDuration"
         @upload="(f) => handleUpload(0, f)"
+        @offsetChange="(v) => handleOffsetChange(0, v)"
       />
       <AudioTrack
         label="Track 2"
         :trackData="tracks[1]"
         :progress="progress"
         :isPlaying="isPlaying"
+        :timeOffset="trackOffsets[1]"
+        :maxDuration="timelineDuration"
         @upload="(f) => handleUpload(1, f)"
+        @offsetChange="(v) => handleOffsetChange(1, v)"
       />
     </div>
 
@@ -48,7 +54,7 @@
         停止
       </button>
       <div class="time-display">
-        {{ formatTime(currentTime) }} / {{ formatTime(maxDuration) }}
+        {{ formatTime(currentTime) }} / {{ formatTime(timelineDuration) }}
       </div>
     </div>
   </div>
@@ -62,6 +68,7 @@ const API_BASE = '/api'
 
 const tracks = ref([null, null])
 const audioBuffers = ref([null, null])
+const trackOffsets = ref([0, 0])
 const isPlaying = ref(false)
 const progress = ref(0)
 const currentTime = ref(0)
@@ -72,14 +79,19 @@ let playStartTime = 0
 let playOffset = 0
 let animFrameId = null
 
-const maxDuration = computed(() => {
-  const d1 = tracks.value[0]?.duration || 0
-  const d2 = tracks.value[1]?.duration || 0
-  return Math.max(d1, d2)
+const timelineDuration = computed(() => {
+  let max = 0
+  for (let i = 0; i < 2; i++) {
+    const dur = tracks.value[i]?.duration || 0
+    const offset = trackOffsets.value[i] || 0
+    const end = offset + dur
+    if (end > max) max = end
+  }
+  return max
 })
 
 const rulerMarks = computed(() => {
-  const dur = maxDuration.value
+  const dur = timelineDuration.value
   if (dur <= 0) return []
   const step = dur <= 10 ? 1 : dur <= 60 ? 5 : 10
   const marks = []
@@ -96,6 +108,10 @@ function formatTime(sec) {
   return `${m}:${s.toString().padStart(2, '0')}.${ms}`
 }
 
+function handleOffsetChange(trackIndex, newOffset) {
+  trackOffsets.value[trackIndex] = Math.max(0, newOffset)
+}
+
 async function handleUpload(trackIndex, file) {
   stopPlayback()
 
@@ -107,6 +123,7 @@ async function handleUpload(trackIndex, file) {
     if (!res.ok) throw new Error('Upload failed')
     const data = await res.json()
     tracks.value[trackIndex] = data
+    trackOffsets.value[trackIndex] = 0
 
     const audioRes = await fetch(`${API_BASE}/audio/${data.id}`)
     const arrayBuf = await audioRes.arrayBuffer()
@@ -133,17 +150,30 @@ function startPlayback() {
   if (audioCtx.state === 'suspended') audioCtx.resume()
 
   sourceNodes = [null, null]
-  const offset = playOffset
+  const globalOffset = playOffset
 
   for (let i = 0; i < 2; i++) {
     const buf = audioBuffers.value[i]
     if (!buf) continue
 
+    const trackOffset = trackOffsets.value[i]
+    const trackDuration = tracks.value[i]?.duration || 0
+    const trackEndGlobal = trackOffset + trackDuration
+
+    if (globalOffset >= trackEndGlobal) continue
+
     const source = audioCtx.createBufferSource()
     source.buffer = buf
     source.connect(audioCtx.destination)
-    source.start(0, offset)
     sourceNodes[i] = source
+
+    if (globalOffset <= trackOffset) {
+      const delay = trackOffset - globalOffset
+      source.start(audioCtx.currentTime + delay, 0)
+    } else {
+      const audioOffset = globalOffset - trackOffset
+      source.start(0, audioOffset)
+    }
 
     source.onended = () => {
       if (sourceNodes[i] === source) {
@@ -155,7 +185,7 @@ function startPlayback() {
     }
   }
 
-  playStartTime = audioCtx.currentTime - offset
+  playStartTime = audioCtx.currentTime - globalOffset
   isPlaying.value = true
   tickProgress()
 }
@@ -196,7 +226,7 @@ function tickProgress() {
   if (!isPlaying.value) return
 
   const elapsed = audioCtx.currentTime - playStartTime
-  const dur = maxDuration.value
+  const dur = timelineDuration.value
 
   currentTime.value = Math.min(elapsed, dur)
   progress.value = dur > 0 ? Math.min(elapsed / dur, 1) : 0
