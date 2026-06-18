@@ -38,11 +38,16 @@ def compute_waveform(file_path: str, n_points: int = WAVEFORM_POINTS) -> dict:
             peak = float(np.max(np.abs(chunk))) if len(chunk) > 0 else 0.0
             waveform.append(peak)
 
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+
     return {
         "waveform": waveform,
         "sample_rate": sr,
         "duration": duration,
         "samples": len(y),
+        "tempo": float(tempo) if tempo is not None else 0.0,
+        "beats": beat_times,
     }
 
 
@@ -73,6 +78,8 @@ async def upload_audio(file: UploadFile = File(...)):
         "sample_rate": info["sample_rate"],
         "duration": info["duration"],
         "samples": info["samples"],
+        "tempo": info["tempo"],
+        "beats": info["beats"],
     })
 
 

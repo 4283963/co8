@@ -4,6 +4,7 @@
       <span class="track-label">{{ label }}</span>
       <span v-if="trackData" class="track-info">
         {{ trackData.filename }} · {{ trackData.duration.toFixed(2) }}s · {{ trackData.sample_rate }}Hz
+        <span v-if="trackData.tempo" class="tempo-badge">{{ trackData.tempo.toFixed(0) }} BPM</span>
         <span v-if="timeOffset > 0" class="offset-badge">+{{ timeOffset.toFixed(2) }}s 延迟</span>
       </span>
       <span v-if="trackData" class="drag-hint">← 拖拽波形调整偏移 →</span>
@@ -59,6 +60,10 @@ let dragStartX = 0
 let dragStartOffset = 0
 let canvasWidthCache = 0
 
+let beatIndex = 0
+let flashIntensity = 0
+let flashRafId = null
+
 function onFileChange(e) {
   const file = e.target.files[0]
   if (file) emit('upload', file)
@@ -94,6 +99,57 @@ function onMouseUp() {
   isDragging.value = false
 }
 
+function triggerBeatFlash() {
+  flashIntensity = 1
+  startFlashDecay()
+}
+
+function startFlashDecay() {
+  if (flashRafId) return
+  const decay = () => {
+    flashIntensity *= 0.85
+    if (flashIntensity < 0.01) {
+      flashIntensity = 0
+      flashRafId = null
+      drawWaveform()
+      return
+    }
+    drawWaveform()
+    flashRafId = requestAnimationFrame(decay)
+  }
+  flashRafId = requestAnimationFrame(decay)
+}
+
+function stopFlashDecay() {
+  if (flashRafId) {
+    cancelAnimationFrame(flashRafId)
+    flashRafId = null
+  }
+}
+
+function checkBeats() {
+  if (!props.trackData || !props.trackData.beats || props.trackData.beats.length === 0) return
+  if (!props.isPlaying) return
+
+  const timelineDur = props.maxDuration || props.trackData.duration
+  const currentGlobalTime = props.progress * timelineDur
+  const beats = props.trackData.beats
+
+  if (beatIndex > 0 && currentGlobalTime < props.timeOffset + beats[beatIndex - 1]) {
+    beatIndex = 0
+  }
+
+  while (beatIndex < beats.length) {
+    const beatGlobalTime = props.timeOffset + beats[beatIndex]
+    if (beatGlobalTime <= currentGlobalTime) {
+      triggerBeatFlash()
+      beatIndex++
+    } else {
+      break
+    }
+  }
+}
+
 function drawWaveform() {
   const canvas = waveformCanvas.value
   if (!canvas || !props.trackData) return
@@ -120,6 +176,16 @@ function drawWaveform() {
 
   ctx.fillStyle = '#1a1a2e'
   ctx.fillRect(0, 0, w, h)
+
+  if (flashIntensity > 0) {
+    const glow = ctx.createRadialGradient(w / 2, centerY, 0, w / 2, centerY, w * 0.6)
+    const alpha = flashIntensity * 0.45
+    glow.addColorStop(0, `rgba(255, 0, 128, ${alpha})`)
+    glow.addColorStop(0.4, `rgba(200, 0, 255, ${alpha * 0.7})`)
+    glow.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    ctx.fillStyle = glow
+    ctx.fillRect(0, 0, w, h)
+  }
 
   ctx.save()
   ctx.beginPath()
@@ -190,8 +256,24 @@ function drawWaveform() {
 }
 
 watch(() => [props.trackData, props.progress, props.isPlaying, props.timeOffset, props.maxDuration], () => {
+  checkBeats()
   nextTick(drawWaveform)
 }, { deep: true })
+
+watch(() => props.trackData, (newData) => {
+  beatIndex = 0
+  flashIntensity = 0
+}, { deep: false })
+
+watch(() => props.isPlaying, (playing) => {
+  if (!playing) {
+    stopFlashDecay()
+  }
+})
+
+watch(() => props.timeOffset, () => {
+  beatIndex = 0
+})
 
 onMounted(() => {
   window.addEventListener('resize', drawWaveform)
@@ -203,6 +285,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', drawWaveform)
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
+  stopFlashDecay()
 })
 </script>
 
@@ -236,6 +319,16 @@ onUnmounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.tempo-badge {
+  display: inline-block;
+  background: rgba(200, 0, 255, 0.2);
+  color: #d400ff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  margin-left: 4px;
 }
 
 .offset-badge {
